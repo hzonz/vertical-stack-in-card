@@ -1,5 +1,5 @@
 console.log(
-  `%cvertical-stack-in-card\n%cVersion: ${'1.2.0'}`,
+  `%cvertical-stack-in-card\n%cVersion: ${'1.1.0'}`,
   'color: #1976d2; font-weight: bold;',
   ''
 );
@@ -10,7 +10,6 @@ class VerticalStackInCard extends HTMLElement {
     this.attachShadow({ mode: 'open' });
     this._refCards = [];
     this._resizeObserver = null;
-    this._gridLayout = null;
   }
 
   setConfig(config) {
@@ -18,7 +17,6 @@ class VerticalStackInCard extends HTMLElement {
       throw new Error('Invalid card configuration: "cards" array is required');
     }
     
-    // 保留官方 grid_options 参数
     this._config = {
       title: config.title || '',
       cards: config.cards,
@@ -27,9 +25,7 @@ class VerticalStackInCard extends HTMLElement {
       responsive: config.responsive || false,
       minWidth: config.minWidth || 300,
       styles: config.styles || {},
-      parts: config.parts || {},
-      // 新增官方 grid_options 支持
-      grid_options: config.grid_options || null
+      parts: config.parts || {}
     };
     
     this.renderCard();
@@ -47,23 +43,16 @@ class VerticalStackInCard extends HTMLElement {
       card.header = this._config.title;
       card.style.overflow = 'hidden';
       
-      // 创建网格容器（如果使用 grid_options）
-      if (this._config.grid_options) {
-        this._gridLayout = document.createElement('div');
-        this._gridLayout.classList.add('grid-layout');
-        this._applyGridOptions();
-      } else {
-        this._gridLayout = document.createElement('div');
-        this._gridLayout.classList.add('stack-container');
-        this._gridLayout.style.gap = `${this._config.spacing}px`;
-      }
+      const cardContent = document.createElement('div');
+      cardContent.classList.add('stack-container');
+      cardContent.style.gap = `${this._config.spacing}px`;
       
       // 处理响应式布局
-      if (this._config.responsive && !this._config.grid_options) {
-        this._gridLayout.style.display = 'grid';
-        this._gridLayout.style.gridTemplateColumns = `repeat(auto-fit, minmax(${this._config.minWidth}px, 1fr))`;
-      } else if (this._config.horizontal && !this._config.grid_options) {
-        this._gridLayout.style.display = 'flex';
+      if (this._config.responsive) {
+        cardContent.style.display = 'grid';
+        cardContent.style.gridTemplateColumns = `repeat(auto-fit, minmax(${this._config.minWidth}px, 1fr))`;
+      } else if (this._config.horizontal) {
+        cardContent.style.display = 'flex';
       }
       
       // 创建子卡片
@@ -76,14 +65,14 @@ class VerticalStackInCard extends HTMLElement {
       // 应用样式和主题
       this._refCards.forEach(card => {
         this._applyCardStyles(card);
-        this._gridLayout.appendChild(card);
+        cardContent.appendChild(card);
       });
       
-      card.appendChild(this._gridLayout);
+      card.appendChild(cardContent);
       this.shadowRoot.appendChild(card);
       
       // 设置ResizeObserver用于动态调整尺寸
-      this._setupResizeObserver(this._gridLayout);
+      this._setupResizeObserver(cardContent);
       
       // 应用主题变量
       this._applyTheme();
@@ -94,52 +83,130 @@ class VerticalStackInCard extends HTMLElement {
     }
   }
 
-  _applyGridOptions() {
-    if (!this._config.grid_options) return;
+  async _createCardElement(cardConfig) {
+    const helpers = await window.loadCardHelpers();
     
-    const options = this._config.grid_options;
-    this._gridLayout.style.display = 'grid';
+    // 处理分隔符类型
+    const element = cardConfig.type === 'divider' 
+      ? helpers.createRowElement(cardConfig)
+      : helpers.createCardElement(cardConfig);
     
-    // 处理列配置
-    if (options.columns) {
-      if (typeof options.columns === 'number') {
-        this._gridLayout.style.gridTemplateColumns = `repeat(${options.columns}, 1fr)`;
-      } else if (Array.isArray(options.columns)) {
-        this._gridLayout.style.gridTemplateColumns = options.columns.join(' ');
-      } else if (typeof options.columns === 'string') {
-        this._gridLayout.style.gridTemplateColumns = options.columns;
+    element.hass = this._hass;
+    
+    // 优化重建事件处理
+    element.addEventListener('ll-rebuild', (ev) => {
+      ev.stopPropagation();
+      this._handleCardRebuild(element, cardConfig);
+    }, { once: true });
+    
+    return element;
+  }
+
+  _handleCardRebuild(oldCard, cardConfig) {
+    const index = this._refCards.indexOf(oldCard);
+    if (index === -1) return;
+    
+    this._createCardElement(cardConfig).then(newCard => {
+      newCard.hass = this._hass;
+      
+      // 替换卡片
+      const container = this.shadowRoot.querySelector('.stack-container');
+      if (container && container.children[index]) {
+        container.replaceChild(newCard, container.children[index]);
+        this._refCards[index] = newCard;
+        this._applyCardStyles(newCard);
+      }
+    });
+  }
+
+  _applyCardStyles(card) {
+    // 应用全局样式
+    if (this._config.styles && Object.keys(this._config.styles).length > 0) {
+      Object.entries(this._config.styles).forEach(([key, value]) => {
+        card.style.setProperty(key, value);
+      });
+    }
+    
+    // 应用部件样式
+    if (this._config.parts && Object.keys(this._config.parts).length > 0) {
+      const partStyles = Object.entries(this._config.parts).map(([part, styles]) => 
+        `${part}: ${Object.entries(styles).map(([k, v]) => `${k}:${v}`).join(';')}`
+      ).join('; ');
+      
+      if (card.part !== undefined) {
+        card.part = partStyles;
       }
     }
     
-    // 处理行配置
-    if (options.rows) {
-      if (typeof options.rows === 'number') {
-        this._gridLayout.style.gridTemplateRows = `repeat(${options.rows}, auto)`;
-      } else if (Array.isArray(options.rows)) {
-        this._gridLayout.style.gridTemplateRows = options.rows.join(' ');
-      } else if (typeof options.rows === 'string') {
-        this._gridLayout.style.gridTemplateRows = options.rows;
+    // 移除默认边距和边框
+    if (card.shadowRoot) {
+      const innerCard = card.shadowRoot.querySelector('ha-card');
+      if (innerCard) {
+        innerCard.style.boxShadow = 'none';
+        innerCard.style.borderRadius = '0';
+        innerCard.style.border = 'none';
       }
-    }
-    
-    // 处理间距
-    if (options.gap) {
-      this._gridLayout.style.gap = typeof options.gap === 'string' ? 
-        options.gap : `${options.gap}px`;
-    } else if (this._config.spacing) {
-      this._gridLayout.style.gap = `${this._config.spacing}px`;
-    }
-    
-    // 处理对齐方式
-    if (options.align_items) {
-      this._gridLayout.style.alignItems = options.align_items;
-    }
-    if (options.justify_content) {
-      this._gridLayout.style.justifyContent = options.justify_content;
     }
   }
 
-  // ... 其他方法保持不变（_createCardElement, _handleCardRebuild, 等）...
+  _setupResizeObserver(container) {
+    // 清理旧的Observer
+    if (this._resizeObserver) {
+      this._resizeObserver.disconnect();
+    }
+    
+    // 创建新的ResizeObserver
+    this._resizeObserver = new ResizeObserver(entries => {
+      this._cardSize = Math.ceil(entries[0].contentRect.height / 50); // 转换为HA单位
+    });
+    
+    this._resizeObserver.observe(container);
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    
+    // 更新所有子卡片的HASS对象
+    this._refCards.forEach(card => {
+      if (card.hass !== hass) {
+        card.hass = hass;
+      }
+    });
+    
+    // 应用主题变化
+    this._applyTheme();
+  }
+
+  _applyTheme() {
+    if (!this._hass || !this._hass.themes) return;
+    
+    const theme = this._hass.themes;
+    const darkMode = theme.darkMode || false;
+    
+    // 设置CSS变量
+    this.style.setProperty('--card-background', darkMode ? '#1e1e1e' : '#ffffff');
+    this.style.setProperty('--primary-color', theme.primaryColor || '#1976d2');
+    this.style.setProperty('--text-color', darkMode ? '#ffffff' : '#000000');
+  }
+
+  _showErrorCard(error) {
+    const errorCard = document.createElement('hui-error-card');
+    errorCard.setConfig({
+      error: 'Vertical Stack Card Error',
+      origConfig: this._config,
+      detail: error.message
+    });
+    
+    while (this.shadowRoot.firstChild) {
+      this.shadowRoot.removeChild(this.shadowRoot.firstChild);
+    }
+    
+    this.shadowRoot.appendChild(errorCard);
+  }
+
+  getCardSize() {
+    return this._cardSize || 1;
+  }
 
   static async getConfigElement() {
     await customElements.whenDefined('hui-vertical-stack-card');
@@ -151,42 +218,46 @@ class VerticalStackInCard extends HTMLElement {
       await customElements.whenDefined('hui-vertical-stack-card');
     }
     
-    const configElement = document.createElement('hui-vertical-stack-card-editor');
-    
-    // 添加 grid_options 支持到编辑器
-    if (configElement) {
-      configElement.addEventListener('config-changed', (ev) => {
-        const config = ev.detail.config;
-        if (config.grid_options) {
-          // 确保配置中包含 grid_options
-          if (!configElement._config) configElement._config = {};
-          configElement._config.grid_options = config.grid_options;
-        }
-      });
+    return document.createElement('hui-vertical-stack-card-editor');
+  }
+
+  static getStubConfig() {
+    return {
+      cards: [],
+      title: 'Vertical Stack',
+      spacing: 8
+    };
+  }
+
+  disconnectedCallback() {
+    // 清理ResizeObserver
+    if (this._resizeObserver) {
+      this._resizeObserver.disconnect();
+      this._resizeObserver = null;
     }
-    
-    return configElement;
   }
 }
 
-// 更新样式以支持 grid_options
+// 定义卡片样式
 const style = document.createElement('style');
 style.textContent = `
   .stack-container {
     display: flex;
     flex-direction: column;
     padding: 8px;
-    gap: var(--vertical-stack-spacing, 8px);
   }
   
-  .grid-layout {
-    display: grid;
-    padding: 8px;
+  .stack-container > * {
+    margin-bottom: var(--vertical-stack-spacing, 8px);
+  }
+  
+  .stack-container > *:last-child {
+    margin-bottom: 0;
   }
   
   @media (max-width: 600px) {
-    .stack-container, .grid-layout {
-      grid-template-columns: 1fr !important;
+    .stack-container {
+      flex-direction: column !important;
     }
   }
 `;
@@ -202,7 +273,7 @@ window.customCards = window.customCards || [];
 window.customCards.push({
   type: 'vertical-stack-in-card',
   name: 'Vertical Stack In Card',
-  description: 'Group multiple cards vertically within a single card container with grid support',
+  description: 'Group multiple cards vertically within a single card container',
   preview: true,
   documentationURL: 'https://github.com/ofekashery/vertical-stack-in-card',
 });
